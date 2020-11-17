@@ -1,0 +1,8 @@
+Package: vectorwindow
+Title: Simple Views Into Existing Vectors Via ALTREP
+Version: 0.0-0
+Author: Luke Tierney
+Description: A simple implementation of views into existing vectors
+Maintainer: Gabriel Becker <gabembecker@gmail.com>
+License: Artistic 2.0
+ByteCompile: yes

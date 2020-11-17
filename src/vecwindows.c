@@ -18,11 +18,18 @@ static R_altrep_class_t window_real_class;
 
 /* windows are ALTREPS with data fields
  
- data1: VECSXP (parent (as external ptr), REALSXP (start, length))
+ data1: VECSXP (REALSXP parent, REALSXP (start, length), ExternalPtr canary (payload is parent SEXP))
  data2: Expanded data SEXP
  
  The canary lets us decrement the references to parent on destruction
- of the altrep.
+ of the altrep IF THIS STILL NEEDS TO OCCUR. We must be careful not to decrement too much.
+
+ If a writable dataptr is retrieve, we set the reference to parent in data1 to R_NilValue,
+ and clear the canary external pointer.
+
+ If the canary is still uncleared upon finalization, the reference was never removed
+ but we know it should be so we can decrement.
+
  
  */
 

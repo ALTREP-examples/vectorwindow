@@ -9,7 +9,7 @@
  ALTREP objects which provide a "window" into an existing
  (standard) vector without
  
- a)  duplicating data
+ a) duplicating data
  b) violating Copy-On-Write
  */
 
@@ -18,29 +18,39 @@ static R_altrep_class_t window_real_class;
 
 /* windows are ALTREPS with data fields
  
- data1: VECSXP (REALSXP parent, REALSXP (start, length), ExternalPtr canary (payload is parent SEXP))
- data2: Expanded data SEXP
+ data1: VECSXP (list) length 2
+     1: (ExternalPtr canary (parent in Protected slot)
+     2: REALSXP (start, length))
+ data2: Expanded data SEXP (initialized to R_NilValue)
  
- The canary lets us decrement the references to parent on destruction
- of the altrep IF THIS STILL NEEDS TO OCCUR. We must be careful not to decrement too much.
 
- If a writable dataptr is retrieve, we set the reference to parent in data1 to R_NilValue,
- and clear the canary external pointer.
+ If data2 (expanded SEXP) is ever not R_NilValue (R's NULL), all methods
+ must hit that, as it means a writeable dataptr has been given out.
 
- If the canary is still uncleared upon finalization, the reference was never removed
- but we know it should be so we can decrement.
+ The canary lets us ensure the reference to parent gets decremented on destruction
+ of the altrep IF THIS STILL NEEDS TO OCCUR. 
+
+ If a writable dataptr is retrieved, we populate data2 (expanded SEXP), then 
+ we set the reference to parent in canary ('protected' field) to R_NilValue, 
+ THEN clear the canary external pointer. 
+
+ If the canary is still uncleared upon finalization, we do the cleanup then
+ which takes care of recovering the reference count automatically.
 
  
  */
 
+
 #define VWINDOW_PARENT(x) R_ExternalPtrProtected(VECTOR_ELT(R_altrep_data1(x), 0))
-#define VWINDOW_UNSET_PARENT(x) do {					\
-	/* this decrements the reference count for parent */		\
-	/* so we remove the canary after doing so */			\
-	R_SetExternalPtrProtected(VECTOR_ELT(R_altrep_data1(x), 0), R_NilValue); \
-	R_ClearExternalPtr(VECTOR_ELT(R_altrep_data1(x), 0));		\
+/* We always want to do this as a unit! */
+#define FULL_CLEAR_EXTPTR(x) do {			\
+	R_SetExternalPtrProtected(x, R_NilValue);	\
+	R_ClearExternalPtr(x);				\
     } while(0)
-//#define VWINDOW_PARENT(x) (SEXP) R_ExternalPtrTag(VECTOR_ELT(CAR(x), 0))
+
+/* this decrements the reference count for parent and then */	
+/* clear's the canary */					
+#define VWINDOW_UNSET_PARENT(x) FULL_CLEAR_EXTPTR(VECTOR_ELT(R_altrep_data1(x), 0))
 #define VWINDOW_START(x) ((R_xlen_t) REAL_ELT(VECTOR_ELT(R_altrep_data1(x), 1), 0))
 #define VWINDOW_LENGTH(x) ((R_xlen_t) REAL_ELT(VECTOR_ELT(R_altrep_data1(x), 1), 1))
 #define VWINDOW_EXPANDED(x) R_altrep_data2(x)
@@ -50,28 +60,26 @@ void canary_finalizer(SEXP x) {
     int *canary = (int *) R_ExternalPtrAddr(x);
     /* check if our canary is still tweeting and hopping about */
     if(canary) {
-	/* This decrement's parent's reference count */
-	R_SetExternalPtrProtected(x, R_NilValue);
+	FULL_CLEAR_EXTPTR(x);
     }
-    R_ClearExternalPtr(x);
 }
 
 SEXP make_window_real(SEXP parent, SEXP start_len) {
     /* carry around a pointer to parent that we can put a finalizer on
        so we're not accumulating reference count that cant be 
        decremented.
-
-       NB we need to make sure this never happens twice.
     */
 
 #ifndef SWITCH_TO_REFCNT
-     /* not needed with reference counting */
+     /* NAMED wouldn't be decremented so in NAMED world just mark parent
+	not mutable for safety */
      MARK_NOT_MUTABLE(parent);
 #endif
     int *canarydata = malloc(sizeof(int));
-    SEXP canary = R_MakeExternalPtr(canarydata, R_NilValue, R_NilValue);
     /* there was a bug in R_MakeExternalPtr which didn't increment ref counts of Prot,
-       but setter works. Future versions wouldn't need this */
+       but setter did. Fixed already in R-devel and R-patched but initializing to
+       R_NilValue then setting it works backwards-compatibly. */
+    SEXP canary = R_MakeExternalPtr(canarydata, R_NilValue, R_NilValue);
     R_SetExternalPtrProtected(canary, parent);
     R_RegisterCFinalizerEx(canary, canary_finalizer, TRUE);
     SEXP mdata = PROTECT(allocVector(VECSXP, 2));
@@ -134,7 +142,7 @@ static void *vwindow_Dataptr(SEXP x, Rboolean writeable)
 	 * no reason to expand things and get all upset about it,
 	 * for read-only case shifted pointer to parent is ok
 	 */
-    return REAL(VWINDOW_PARENT(x)) + start;
+	return REAL_RO(VWINDOW_PARENT(x)) + start;
     }
     
     /* 
@@ -158,7 +166,7 @@ static const void *vwindow_Dataptr_or_null(SEXP x)
     /* already expanded, so just do that */
     SEXP exp = VWINDOW_EXPANDED(x);
     if(exp != R_NilValue) {
-	return REAL(exp);
+	return REAL_RO(exp);
     }
     
     /* no thanks I like being an ALTREP */
